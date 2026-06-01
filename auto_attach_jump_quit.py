@@ -17,7 +17,9 @@ gdb_set_silent("set print thread-events off")
 gdb_set_silent("set print inferior-events off")
 gdb_set_silent("set verbose off")
 
-gdb_set_silent("handle SIGINT noprint nostop pass")
+# Timeout cleanup uses GDB's interrupt command. Keep the resulting SIGINT
+# inside GDB so it cannot be delivered to gaussdb when detaching.
+gdb_set_silent("handle SIGINT noprint stop nopass")
 gdb_set_silent("handle SIGUSR1 noprint nostop pass")
 gdb_set_silent("handle SIGUSR2 noprint nostop pass")
 gdb_set_silent("handle SIG36 noprint nostop pass")
@@ -80,6 +82,9 @@ def on_stop(event):
     global cleanup_pending
 
     if cleanup_pending:
+        if isinstance(event, gdb.SignalEvent) and event.stop_signal == "SIGINT":
+            # Explicitly discard the synthetic timeout interrupt before detach.
+            gdb_set_silent("queue-signal 0")
         gdb.post_event(lambda: detach_and_quit("[+] stopped after interrupt, detach and quit gdb"))
 
 
