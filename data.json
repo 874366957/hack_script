@@ -1,0 +1,42 @@
+{
+  "queries": [
+    {
+      "file": "example.java",
+      "lines": [1, 5, 10, 15],
+      "covering_tasks": [
+        {
+          "task_id": 1001,
+          "task_type": "unit_test",
+          "task_name": "testDataInitialization",
+          "version": 1
+        },
+        {
+          "task_id": 1002,
+          "task_type": "integration_test",
+          "task_name": "testDataProcessing",
+          "version": 2
+        }
+      ],
+      "total_tasks": 2
+    },
+    {
+      "file": "another.java",
+      "lines": [20, 25],
+      "covering_tasks": [
+        {
+          "task_id": 2001,
+          "task_type": "performance_test",
+          "task_name": "benchmarkQuery",
+          "version": 1
+        }
+      ],
+      "total_tasks": 1
+    }
+  ],
+  "all_covering_tasks": {
+    "unit_test": ["testDataInitialization", "testDataValidation"],
+    "integration_test": ["testDataProcessing", "testDataMerge"],
+    "performance_test": ["benchmarkQuery", "benchmarkSort"]
+  },
+  "total_tasks": 4
+}

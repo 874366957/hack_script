@@ -1,6 +1,46 @@
-
 #!/usr/bin/env bash
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA_JSON_PATH="${DATA_JSON_PATH:-"$SCRIPT_DIR/data.json"}"
+DATA_PARSER_PATH="${DATA_PARSER_PATH:-"$SCRIPT_DIR/parse_data.py"}"
+
+run_python() {
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys' >/dev/null 2>&1; then
+        python3 "$@"
+    elif command -v python >/dev/null 2>&1 && python -c 'import sys' >/dev/null 2>&1; then
+        python "$@"
+    elif command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
+        py -3 "$@"
+    else
+        echo "[bash] ERROR: python not found" >&2
+        return 1
+    fi
+}
+
+load_data_json_queries() {
+    if [ ! -f "$DATA_JSON_PATH" ]; then
+        echo "[bash] ERROR: data.json not found: $DATA_JSON_PATH" >&2
+        return 1
+    fi
+
+    if [ ! -f "$DATA_PARSER_PATH" ]; then
+        echo "[bash] ERROR: parser not found: $DATA_PARSER_PATH" >&2
+        return 1
+    fi
+
+    run_python "$DATA_PARSER_PATH" "$DATA_JSON_PATH"
+}
+
+handle_query_data() {
+    local query_index="$1"
+    local file_name="$2"
+    local lines_csv="$3"
+    local total_tasks="$4"
+    local covering_tasks_json="$5"
+
+    echo "[bash] data query[$query_index]: file=$file_name lines=$lines_csv total_tasks=$total_tasks covering_tasks=$covering_tasks_json" >&2
+}
 
 GAUSS_PID="$1"
 BREAK_LOC="$2"
@@ -8,6 +48,13 @@ JUMP_LOC="$3"
 CASE_TYPE="$4"
 CASE_PAYLOAD="$5"
 TIMEOUT_SEC="${6:-30}"
+
+query_data="$(load_data_json_queries)" || exit 1
+if [ -n "$query_data" ]; then
+    while IFS=$'\t' read -r query_index file_name lines_csv total_tasks covering_tasks_json; do
+        handle_query_data "$query_index" "$file_name" "$lines_csv" "$total_tasks" "$covering_tasks_json"
+    done <<< "$query_data"
+fi
 
 thread_id=""
 
