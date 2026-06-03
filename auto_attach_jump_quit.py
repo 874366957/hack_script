@@ -1,4 +1,5 @@
 import gdb
+import os
 import sys
 import traceback
 
@@ -118,6 +119,164 @@ def eval_and_print(expr):
         print(f"__GDB_PRINT_ERROR__={e}", flush=True)
 
 
+def allow_cross_function_jump():
+    return os.environ.get("ALLOW_CROSS_FUNCTION_JUMP") == "1"
+
+
+def block_function_name(block):
+    while block:
+        try:
+            function = block.function
+        except Exception:
+            function = None
+
+        if function:
+            return function.print_name or function.name
+
+        try:
+            block = block.superblock
+        except Exception:
+            return None
+
+    return None
+
+
+def function_name_for_pc(pc):
+    try:
+        return block_function_name(gdb.block_for_pc(pc))
+    except Exception:
+        return None
+
+
+def selected_pc():
+    try:
+        return int(gdb.parse_and_eval("$pc"))
+    except Exception:
+        return None
+
+
+def info_symbol_for_pc(pc):
+    try:
+        return gdb.execute(f"info symbol 0x{pc:x}", to_string=True).strip()
+    except Exception as e:
+        return f"<info symbol failed: {e}>"
+
+
+def looks_like_static_initializer(text):
+    if not text:
+        return False
+
+    static_init_markers = [
+        "_GLOBAL__sub_I_",
+        "__static_initialization_and_destruction_0",
+        "__libc_csu_init",
+        "InitBeforeMain",
+    ]
+    return any(marker in text for marker in static_init_markers)
+
+
+def sal_location(sal):
+    symtab = getattr(sal, "symtab", None)
+    line = getattr(sal, "line", None)
+
+    if symtab:
+        try:
+            filename = symtab.fullname()
+        except Exception:
+            filename = symtab.filename
+    else:
+        filename = "<unknown>"
+
+    if line:
+        return f"{filename}:{line}"
+
+    return filename
+
+
+def describe_candidate(index, sal):
+    try:
+        pc = int(sal.pc)
+    except Exception:
+        pc = None
+
+    if pc is None:
+        print(f"[+] jump candidate[{index}]: pc=<none> loc={sal_location(sal)}", flush=True)
+        return None
+
+    function = function_name_for_pc(pc)
+    symbol = info_symbol_for_pc(pc)
+    print(
+        f"[+] jump candidate[{index}]: pc=0x{pc:x} loc={sal_location(sal)} "
+        f"function={function or '<unknown>'} symbol={symbol}",
+        flush=True,
+    )
+
+    return {
+        "pc": pc,
+        "function": function,
+        "location": sal_location(sal),
+        "symbol": symbol,
+    }
+
+
+def resolve_jump_target(jump_loc, current_function):
+    sal_tuple = gdb.decode_line(jump_loc)[1]
+    if not sal_tuple:
+        print(f"[-] cannot decode jump location: {jump_loc}", flush=True)
+        return None
+
+    candidates = []
+    print(f"[+] decoded {len(sal_tuple)} jump candidate(s) for {jump_loc}", flush=True)
+
+    for index, sal in enumerate(sal_tuple):
+        candidate = describe_candidate(index, sal)
+        if candidate:
+            candidates.append(candidate)
+
+    if not candidates:
+        print(f"[-] no usable jump target pc for {jump_loc}", flush=True)
+        return None
+
+    same_function_candidates = [
+        candidate
+        for candidate in candidates
+        if current_function and candidate["function"] == current_function
+    ]
+
+    if same_function_candidates:
+        candidate = same_function_candidates[0]
+        if (
+            not allow_cross_function_jump()
+            and (
+                looks_like_static_initializer(candidate["function"])
+                or looks_like_static_initializer(candidate["symbol"])
+            )
+        ):
+            print(
+                f"[-] refuse jump into static initializer target: "
+                f"function={candidate['function'] or '<unknown>'} symbol={candidate['symbol']}",
+                flush=True,
+            )
+            return None
+        return candidate
+
+    if allow_cross_function_jump():
+        candidate = candidates[0]
+        print(
+            f"[!] ALLOW_CROSS_FUNCTION_JUMP=1: using cross-function target "
+            f"{candidate['function'] or '<unknown>'} at 0x{candidate['pc']:x}",
+            flush=True,
+        )
+        return candidate
+
+    print(
+        f"[-] refuse cross-function jump: current function={current_function or '<unknown>'}; "
+        f"jump_loc={jump_loc}. Set ALLOW_CROSS_FUNCTION_JUMP=1 to override.",
+        flush=True,
+    )
+    return None
+
+
 def global_exception_handler(exc_type, exc_value, tb):
     print("[!] Unhandled Python exception in GDB script:", flush=True)
     traceback.print_exception(exc_type, exc_value, tb)
@@ -141,20 +300,36 @@ class AutoJumpQuitBP(gdb.Breakpoint):
             hit_thread = gdb.selected_thread()
             print(f"[+] hit thread: num={hit_thread.num}, ptid={hit_thread.ptid}", flush=True)
 
+            gdb.execute(f"thread {hit_thread.num}", to_string=True)
+            current_pc = selected_pc()
+            current_function = function_name_for_pc(current_pc) if current_pc is not None else None
+            current_pc_text = f"0x{current_pc:x}" if current_pc is not None else "<unknown>"
+            print(
+                f"[+] current pc={current_pc_text} function={current_function or '<unknown>'}",
+                flush=True,
+            )
+
             eval_and_print(self.print_expr)
 
-            sal_tuple = gdb.decode_line(self.jump_loc)[1]
-            if not sal_tuple:
-                post_detach_and_quit(f"[-] cannot decode jump location: {self.jump_loc}")
+            target = resolve_jump_target(self.jump_loc, current_function)
+            if not target:
+                post_detach_and_quit("[-] unsafe jump target, detach and quit gdb")
                 return True
 
-            target = sal_tuple[0].pc
+            target_pc = target["pc"]
+            target_function = target["function"]
+            if current_function != target_function:
+                print(
+                    f"[!] cross-function jump: {current_function or '<unknown>'} -> "
+                    f"{target_function or '<unknown>'}",
+                    flush=True,
+                )
 
-            print(f"[+] set current thread $pc = {self.jump_loc} / 0x{target:x}", flush=True)
+            print(f"[+] set current thread $pc = {self.jump_loc} / 0x{target_pc:x}", flush=True)
 
             # 只修改命中断点线程
             gdb.execute(f"thread {hit_thread.num}", to_string=True)
-            gdb.execute(f"set $pc = 0x{target:x}", to_string=True)
+            gdb.execute(f"set $pc = 0x{target_pc:x}", to_string=True)
 
             post_detach_and_quit("[+] jump done, detach and quit gdb")
 
